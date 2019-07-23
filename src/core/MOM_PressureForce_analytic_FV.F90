@@ -14,17 +14,21 @@ use MOM_unit_scaling, only : unit_scale_type
 use MOM_variables, only : thermo_var_ptrs
 use MOM_verticalGrid, only : verticalGrid_type
 use MOM_EOS, only : calculate_density, calculate_density_derivs
+use MOM_EOS, only : calculate_density_second_derivs
 use MOM_EOS, only : int_density_dz, int_specific_vol_dp
 use MOM_EOS, only : int_density_dz_generic_plm, int_density_dz_generic_ppm
 use MOM_EOS, only : int_spec_vol_dp_generic_plm
+use MOM_EOS, only : int_density_dz_deltarho
 use MOM_EOS, only : int_density_dz_generic, int_spec_vol_dp_generic
 use MOM_ALE, only : pressure_gradient_plm, pressure_gradient_ppm, ALE_CS
+use MOM_MEKE_types, only : MEKE_type
+use MOM_lateral_mixing_coeffs, only : VarMix_CS
 
 implicit none ; private
 
 #include <MOM_memory.h>
 
-public PressureForce_AFV, PressureForce_AFV_init, PressureForce_AFV_end
+public PressureForce_AFV_init, PressureForce_AFV_end
 public PressureForce_AFV_Bouss, PressureForce_AFV_nonBouss
 
 ! A note on unit descriptions in comments: MOM6 uses units that can be rescaled for dimensional
@@ -56,39 +60,11 @@ type, public :: PressureForce_AFV_CS ; private
                             !! By the default (1) is for a piecewise linear method
 
   integer :: id_e_tidal = -1 !< Diagnostic identifier
+  integer :: id_deltarho3d = -1 ! Diagnostic for deltarho_eos
   type(tidal_forcing_CS), pointer :: tides_CSp => NULL() !< Tides control structure
 end type PressureForce_AFV_CS
 
 contains
-
-!> Thin interface between the model and the Boussinesq and non-Boussinesq
-!! pressure force routines.
-subroutine PressureForce_AFV(h, tv, PFu, PFv, G, GV, US, CS, ALE_CSp, p_atm, pbce, eta)
-  type(ocean_grid_type),                     intent(in)    :: G   !< Ocean grid structure
-  type(verticalGrid_type),                   intent(in)    :: GV  !< Vertical grid structure
-  type(unit_scale_type),                     intent(in)    :: US  !< A dimensional unit scaling type
-  real, dimension(SZI_(G),SZJ_(G),SZK_(G)),  intent(in)    :: h   !< Layer thickness [H ~> m or kg m-2]
-  type(thermo_var_ptrs),                     intent(inout) :: tv  !< Thermodynamic variables
-  real, dimension(SZIB_(G),SZJ_(G),SZK_(G)), intent(out)   :: PFu !< Zonal acceleration [m s-2]
-  real, dimension(SZI_(G),SZJB_(G),SZK_(G)), intent(out)   :: PFv !< Meridional acceleration [m s-2]
-  type(PressureForce_AFV_CS),                pointer       :: CS  !< Finite volume PGF control structure
-  type(ALE_CS),                              pointer       :: ALE_CSp !< ALE control structure
-  real, dimension(:,:),                      optional, pointer :: p_atm !< The pressure at the ice-ocean
-                                                           !! or atmosphere-ocean interface [Pa].
-  real, dimension(SZI_(G),SZJ_(G),SZK_(G)),  optional, intent(out) :: pbce !< The baroclinic pressure
-                                                           !! anomaly in each layer due to eta anomalies
-                                                           !! [m2 s-2 H-1 ~> m s-2 or m4 s-2 kg-1].
-  real, dimension(SZI_(G),SZJ_(G)),          optional, intent(out) :: eta !< The bottom mass used to
-                                                           !! calculate PFu and PFv [H ~> m or kg m-2], with any tidal
-                                                           !! contributions or compressibility compensation.
-
-  if (GV%Boussinesq) then
-    call PressureForce_AFV_bouss(h, tv, PFu, PFv, G, GV, US, CS, ALE_CSp, p_atm, pbce, eta)
-  else
-    call PressureForce_AFV_nonbouss(h, tv, PFu, PFv, G, GV, US, CS, ALE_CSp, p_atm, pbce, eta)
-  endif
-
-end subroutine PressureForce_AFV
 
 !> \brief Non-Boussinesq analytically-integrated finite volume form of pressure gradient
 !!
@@ -442,7 +418,7 @@ end subroutine PressureForce_AFV_nonBouss
 !! To work, the following fields must be set outside of the usual (is:ie,js:je)
 !! range before this subroutine is called:
 !!   h(isB:ie+1,jsB:je+1), T(isB:ie+1,jsB:je+1), and S(isB:ie+1,jsB:je+1).
-subroutine PressureForce_AFV_Bouss(h, tv, PFu, PFv, G, GV, US, CS, ALE_CSp, p_atm, pbce, eta)
+subroutine PressureForce_AFV_Bouss(h, tv, PFu, PFv, G, GV, US, CS, ALE_CSp, p_atm, pbce, eta, MEKE, VarMix)
   type(ocean_grid_type),                     intent(in)  :: G   !< Ocean grid structure
   type(verticalGrid_type),                   intent(in)  :: GV  !< Vertical grid structure
   type(unit_scale_type),                     intent(in)  :: US  !< A dimensional unit scaling type
@@ -460,7 +436,21 @@ subroutine PressureForce_AFV_Bouss(h, tv, PFu, PFv, G, GV, US, CS, ALE_CSp, p_at
   real, dimension(SZI_(G),SZJ_(G)),          optional, intent(out) :: eta !< The bottom mass used to
                                                          !! calculate PFu and PFv [H ~> m or kg m-2], with any
                                                          !! tidal contributions or compressibility compensation.
+  type(MEKE_type),                          optional, pointer     :: MEKE   !< Pointer to a structure containing fields
+  type(VarMix_CS),                          optional, pointer     :: VarMix !< Variable mixing coefficients
   ! Local variables
+  real, dimension(SZI_(G),SZJ_(G),SZK_(G)+1) :: deltarho_eos ! patchy deltarho due to EOS [kg m-3].
+  real, dimension(SZI_(G)) :: press ! pressure at each interface (Pa)            
+  real :: cff_drho, cff1       ! coefficient forpatchy deltarho parameterization      
+  real :: Ttmp(SZI_(G))        ! Interface temperature in C.                     
+  real :: Stmp(SZI_(G))        ! Interface salinity in PSU.                      
+  real :: drho_dT(SZI_(G))     ! Partial derivatives of density with temperature 
+  real :: drho_dS(SZI_(G))     ! and salinity in kg m-3 K-1 and kg m-3 PSU-1.    
+  real :: drho_dS_dS(SZI_(G))    
+  real :: drho_dS_dT(SZI_(G))    
+  real :: drho_dT_dT(SZI_(G))    
+  real :: drho_dS_dP(SZI_(G))    
+  real :: drho_dT_dP(SZI_(G))    
   real, dimension(SZI_(G),SZJ_(G),SZK_(G)+1) :: e ! Interface height in depth units [Z ~> m].
   real, dimension(SZI_(G),SZJ_(G))  :: &
     e_tidal, &  ! The bottom geopotential anomaly due to tidal forces from
@@ -512,8 +502,13 @@ subroutine PressureForce_AFV_Bouss(h, tv, PFu, PFv, G, GV, US, CS, ALE_CSp, p_at
   type(thermo_var_ptrs) :: tv_tmp! A structure of temporary T & S.
 
   real, parameter :: C1_6 = 1.0/6.0
+  real, parameter :: C1_8 = 1.0/8.0
+  real :: bcorr              ! correlation coeff. 
+  real :: Tl(10), Sl(10), hl(10) ! Copies of local stencil
+  real :: mn_S, mn_T, mn_ST, mn_T2, mn_H
   integer :: is, ie, js, je, Isq, Ieq, Jsq, Jeq, nz, nkmb
   integer :: i, j, k
+  integer :: km1
 
   is = G%isc ; ie = G%iec ; js = G%jsc ; je = G%jec ; nz = G%ke
   nkmb=GV%nk_rho_varies
@@ -569,6 +564,89 @@ subroutine PressureForce_AFV_Bouss(h, tv, PFu, PFv, G, GV, US, CS, ALE_CSp, p_at
   do j=Jsq,Jeq+1; do k=nz,1,-1 ; do i=Isq,Ieq+1
     e(i,j,K) = e(i,j,K+1) + h(i,j,k)*GV%H_to_Z
   enddo ; enddo ; enddo
+
+  cff_drho = 25.0*(-0.01/8.0)                                                   
+  deltarho_eos(:,:,:) = 0.0                                                          
+  do j=Jsq,Jeq+1                                                                 
+    do k=1,nz                                                                    
+      km1 = max(1,k-1)
+      do i=Isq,Ieq+1                                                             
+        press(i) = -GV%Rho0*GV%g_Earth*e(i,j,k)                                  
+        Ttmp(i) = 0.5*(tv%T(i,j,km1)+tv%T(i,j,k))                                
+        Stmp(i) = 0.5*(tv%S(i,j,km1)+tv%S(i,j,k))                                
+      enddo                                                                      
+      call calculate_density_derivs(Ttmp, Stmp, press, drho_dT, &                
+                       drho_dS, Isq, Ieq-Isq+2, tv%eqn_of_state)                 
+      call calculate_density_second_derivs(Ttmp, Stmp, press, drho_dS_dS, drho_dS_dT, drho_dT_dT, &                
+                       drho_dS_dP, drho_dT_dP, Isq, Ieq-Isq+2, tv%eqn_of_state)                 
+      do i=Isq,Ieq+1                                                             
+         bcorr = 0.0
+         Tl(1) = tv%T(i,j,k)   ; Tl(2) = tv%T(i-1,j,k) ; Tl(3) = tv%T(i+1,j,k) 
+         Tl(4) = tv%T(i,j-1,k) ; Tl(5) = tv%T(i,j+1,k)
+
+         Tl(6) = tv%T(i,j,km1)   ; Tl(7) = tv%T(i-1,j,km1) ; Tl(8) = tv%T(i+1,j,km1) 
+         Tl(9) = tv%T(i,j-1,km1) ; Tl(10) = tv%T(i,j+1,km1)
+
+         Sl(1) = tv%S(i,j,k)   ; Sl(2) = tv%S(i-1,j,k) ; Sl(3) = tv%S(i+1,j,k) 
+         Sl(4) = tv%S(i,j-1,k) ; Sl(5) = tv%S(i,j+1,k)
+         
+         Sl(6) = tv%S(i,j,km1)   ; Sl(7) = tv%S(i-1,j,km1) ; Sl(8) = tv%S(i+1,j,km1) 
+         Sl(9) = tv%S(i,j-1,km1) ; Sl(10) = tv%S(i,j+1,km1)
+
+         hl(1) = h(i,j,k)      ; hl(2) = h(i-1,j,k)    ; hl(3) = h(i+1,j,k) 
+         hl(4) = h(i,j-1,k)    ; hl(5) = h(i,j+1,k)
+         
+         hl(6) = h(i,j,km1)      ; hl(7) = h(i-1,j,km1)    ; hl(8) = h(i+1,j,km1) 
+         hl(9) = h(i,j-1,km1)    ; hl(10) = h(i,j+1,km1)
+
+         mn_H = hl(1) + ( ( hl(2) + hl(3) ) + ( hl(4) + hl(5) ) ) &
+              + hl(6) + ( ( hl(7) + hl(8) ) + ( hl(9) + hl(10) ) )
+         if (mn_H>0.) mn_H = 1. / mn_H ! Hereafter, mn_H is the reciprocal of mean h for the stencil
+         ! Mean of S,T
+         mn_S = ( hl(1)*Sl(1) + ( ( hl(2)*Sl(2) + hl(3)*Sl(3) ) + ( hl(4)*Sl(4) + hl(5)*Sl(5) ) ) & 
+                + hl(6)*Sl(6) + ( ( hl(7)*Sl(7) + hl(8)*Sl(8) ) + ( hl(9)*Sl(9) + hl(10)*Sl(10) ) ) ) * mn_H
+         mn_T = ( hl(1)*Tl(1) + ( ( hl(2)*Tl(2) + hl(3)*Tl(3) ) + ( hl(4)*Tl(4) + hl(5)*Tl(5) ) ) &
+                + hl(6)*Tl(6) + ( ( hl(7)*Tl(7) + hl(8)*Tl(8) ) + ( hl(9)*Tl(9) + hl(10)*Tl(10) ) ) ) * mn_H
+         ! Adjust S,T vectors to have zero mean
+         Sl(:) = Sl(:) - mn_S ; mn_S = 0.
+         Tl(:) = Tl(:) - mn_T ; mn_T = 0.
+         ! Variance of T (or mean square error if mean is removed above)
+         mn_T2 = ( hl(1)*Tl(1)*Tl(1) + ( ( hl(2)*Tl(2)*Tl(2) + hl(3)*Tl(3)*Tl(3) )   &
+                                       + ( hl(4)*Tl(4)*Tl(4) + hl(5)*Tl(5)*Tl(5) ) ) &
+                 + hl(6)*Tl(6)*Tl(6) + ( ( hl(7)*Tl(7)*Tl(7) + hl(8)*Tl(8)*Tl(8) )   &
+                                       + ( hl(9)*Tl(9)*Tl(9) + hl(10)*Tl(10)*Tl(10) ) ) ) * mn_H
+         mn_T2 = max(0., mn_T2 - mn_T*mn_T) ! Variance should be positive but round-off can violate this.
+         ! Covariance of S,T
+         mn_ST = ( hl(1)*Sl(1)*Tl(1) + ( ( hl(2)*Sl(2)*Tl(2) + hl(3)*Sl(3)*Tl(3) )   &
+                                       + ( hl(4)*Sl(4)*Tl(4) + hl(5)*Sl(5)*Tl(5) ) ) & 
+                 + hl(6)*Sl(6)*Tl(6) + ( ( hl(7)*Sl(7)*Tl(7) + hl(8)*Sl(8)*Tl(8) )   &
+                                       + ( hl(9)*Sl(9)*Tl(9) + hl(10)*Sl(10)*Tl(10) ) ) ) * mn_H
+
+         cff1 =( hl(1)*((drho_dT(i)*Tl(1)-drho_dS(i)*Sl(1)))**2 +     &
+                ( (hl(2)*((drho_dT(i)*Tl(2)-drho_dS(i)*Sl(2)))**2 +   &
+                   hl(3)*((drho_dT(i)*Tl(3)-drho_dS(i)*Sl(3)))**2 ) + &
+                  (hl(4)*((drho_dT(i)*Tl(4)-drho_dS(i)*Sl(4)))**2 +   & 
+                   hl(5)*((drho_dT(i)*Tl(5)-drho_dS(i)*Sl(5)))**2 ) ) &
+               + hl(6)*((drho_dT(i)*Tl(6)-drho_dS(i)*Sl(6)))**2 +     &
+                ( (hl(7)*((drho_dT(i)*Tl(7)-drho_dS(i)*Sl(7)))**2 +   &
+                   hl(8)*((drho_dT(i)*Tl(8)-drho_dS(i)*Sl(8)))**2 ) + &
+                  (hl(9)*((drho_dT(i)*Tl(9)-drho_dS(i)*Sl(9)))**2 +   & 
+                   hl(10)*((drho_dT(i)*Tl(10)-drho_dS(i)*Sl(10)))**2 ) ) )*mn_H
+
+         if(abs(cff1)> 0.) bcorr = ((drho_dT(i)*mn_T2)-(drho_dS(i)*mn_ST)) / cff1
+
+         ! deltarho_eos(i,j,k) = max(-2.0, &                     
+                  ! cff_drho*(MEKE%deltarho_TW(i,j)**2)*(bcorr**2) * &           
+                  ! 5.0*C1_8*drho_dT_dT(i)*(MEKE%deltarho_TW(i,j)**2)*(bcorr**2) * &           
+                  ! (0.5*(VarMix%ebt_struct(i,j,k)+VarMix%ebt_struct(i,j,km1)))**2 )
+
+         deltarho_eos(i,j,k) = max(-2.0, &                      
+             -0.5*MEKE%deltarho_TW(i,j) * &                                         
+            (0.5*(VarMix%ebt_struct(i,j,k)+VarMix%ebt_struct(i,j,km1)))**2 )
+
+      enddo                                                                      
+    enddo                                                                        
+  enddo                                                                          
 
   if (use_EOS) then
 ! With a bulk mixed layer, replace the T & S of any layers that are
@@ -694,6 +772,9 @@ subroutine PressureForce_AFV_Bouss(h, tv, PFu, PFv, G, GV, US, CS, ALE_CSp, p_at
                   dpa, intz_dpa, intx_dpa, inty_dpa, &
                   G%bathyT, dz_neglect, CS%useMassWghtInterp)
       endif
+      call int_density_dz_deltarho( e(:,:,K), e(:,:,K+1), deltarho_eos(:,:,k), &  
+                     deltarho_eos(:,:,k+1), g_Earth_z, G%HI, G%HI, & 
+                     dpa, intz_dpa, intx_dpa, inty_dpa)     
       !$OMP parallel do default(shared)
       do j=Jsq,Jeq+1 ; do i=Isq,Ieq+1
         intz_dpa(i,j) = intz_dpa(i,j)*GV%Z_to_H
@@ -778,6 +859,7 @@ subroutine PressureForce_AFV_Bouss(h, tv, PFu, PFv, G, GV, US, CS, ALE_CSp, p_at
   endif
 
   if (CS%id_e_tidal>0) call post_data(CS%id_e_tidal, e_tidal, CS%diag)
+  if (CS%id_deltarho3d>0) call post_data(CS%id_deltarho3d, deltarho_eos, CS%diag)
 
 end subroutine PressureForce_AFV_Bouss
 
@@ -846,6 +928,8 @@ subroutine PressureForce_AFV_init(Time, G, GV, US, param_file, diag, CS, tides_C
     CS%id_e_tidal = register_diag_field('ocean_model', 'e_tidal', diag%axesT1, &
         Time, 'Tidal Forcing Astronomical and SAL Height Anomaly', 'meter', conversion=US%Z_to_m)
   endif
+  CS%id_deltarho3d = register_diag_field('ocean_model', 'MEKE_deltarho_eos', diag%axesTi, &
+          Time, 'MEKE derived patchy deltarho due to EOS in 3d', 'kg m-3')
 
   CS%GFS_scale = 1.0
   if (GV%g_prime(1) /= GV%g_Earth) CS%GFS_scale = GV%g_prime(1) / GV%g_Earth

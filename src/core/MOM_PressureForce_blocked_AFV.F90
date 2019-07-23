@@ -17,14 +17,17 @@ use MOM_EOS, only : calculate_density, calculate_density_derivs
 use MOM_EOS, only : int_density_dz, int_specific_vol_dp
 use MOM_EOS, only : int_density_dz_generic_plm, int_density_dz_generic_ppm
 use MOM_EOS, only : int_spec_vol_dp_generic_plm
+use MOM_EOS, only : int_density_dz_deltarho
 use MOM_EOS, only : int_density_dz_generic, int_spec_vol_dp_generic
 use MOM_ALE, only : pressure_gradient_plm, pressure_gradient_ppm, ALE_CS
+use MOM_MEKE_types, only : MEKE_type
+use MOM_lateral_mixing_coeffs, only : VarMix_CS
 
 implicit none ; private
 
 #include <MOM_memory.h>
 
-public PressureForce_blk_AFV, PressureForce_blk_AFV_init, PressureForce_blk_AFV_end
+public PressureForce_blk_AFV_init, PressureForce_blk_AFV_end
 public PressureForce_blk_AFV_Bouss, PressureForce_blk_AFV_nonBouss
 
 ! A note on unit descriptions in comments: MOM6 uses units that can be rescaled for dimensional
@@ -56,39 +59,11 @@ type, public :: PressureForce_blk_AFV_CS ; private
                             !! By the default (1) is for a piecewise linear method
 
   integer :: id_e_tidal = -1 !< Diagnostic identifier
+  integer :: id_deltarho3d = -1 ! Diagnostic for deltarho_eos
   type(tidal_forcing_CS), pointer :: tides_CSp => NULL() !< Tides control structure
 end type PressureForce_blk_AFV_CS
 
 contains
-
-!> Thin interface between the model and the Boussinesq and non-Boussinesq
-!! pressure force routines.
-subroutine PressureForce_blk_AFV(h, tv, PFu, PFv, G, GV, US, CS, ALE_CSp, p_atm, pbce, eta)
-  type(ocean_grid_type),                     intent(in)    :: G   !< Ocean grid structure
-  type(verticalGrid_type),                   intent(in)    :: GV  !< Vertical grid structure
-  type(unit_scale_type),                     intent(in)    :: US  !< A dimensional unit scaling type
-  real, dimension(SZI_(G),SZJ_(G),SZK_(G)),  intent(in)    :: h   !< Layer thickness [H ~> m or kg m-2]
-  type(thermo_var_ptrs),                     intent(inout) :: tv  !< Thermodynamic variables
-  real, dimension(SZIB_(G),SZJ_(G),SZK_(G)), intent(out)   :: PFu !< Zonal acceleration [m s-2]
-  real, dimension(SZI_(G),SZJB_(G),SZK_(G)), intent(out)   :: PFv !< Meridional acceleration [m s-2]
-  type(PressureForce_blk_AFV_CS),            pointer       :: CS  !< Finite volume PGF control structure
-  type(ALE_CS),                              pointer       :: ALE_CSp !< ALE control structure
-  real, dimension(:,:),                      optional, pointer :: p_atm !< The pressure at the ice-ocean
-                                                           !! or atmosphere-ocean interface [Pa].
-  real, dimension(SZI_(G),SZJ_(G),SZK_(G)),  optional, intent(out) :: pbce !< The baroclinic pressure
-                                                           !! anomaly in each layer due to eta anomalies
-                                                           !! [m2 s-2 H-1 ~> m s-2 or m4 s-2 kg-1].
-  real, dimension(SZI_(G),SZJ_(G)),          optional, intent(out) :: eta !< The bottom mass used to
-                                                           !! calculate PFu and PFv [H ~> m or kg m-2], with any tidal
-                                                           !! contributions or compressibility compensation.
-
-  if (GV%Boussinesq) then
-    call PressureForce_blk_AFV_bouss(h, tv, PFu, PFv, G, GV, US, CS, ALE_CSp, p_atm, pbce, eta)
-  else
-    call PressureForce_blk_AFV_nonbouss(h, tv, PFu, PFv, G, GV, US, CS, p_atm, pbce, eta)
-  endif
-
-end subroutine PressureForce_blk_AFV
 
 !> \brief Non-Boussinesq analytically-integrated finite volume form of pressure gradient
 !!
@@ -423,7 +398,7 @@ end subroutine PressureForce_blk_AFV_nonBouss
 !! To work, the following fields must be set outside of the usual (is:ie,js:je)
 !! range before this subroutine is called:
 !!   h(isB:ie+1,jsB:je+1), T(isB:ie+1,jsB:je+1), and S(isB:ie+1,jsB:je+1).
-subroutine PressureForce_blk_AFV_Bouss(h, tv, PFu, PFv, G, GV, US, CS, ALE_CSp, p_atm, pbce, eta)
+subroutine PressureForce_blk_AFV_Bouss(h, tv, PFu, PFv, G, GV, US, CS, ALE_CSp, p_atm, pbce, eta, MEKE, VarMix)
   type(ocean_grid_type),                     intent(in)  :: G   !< Ocean grid structure
   type(verticalGrid_type),                   intent(in)  :: GV  !< Vertical grid structure
   type(unit_scale_type),                     intent(in)  :: US  !< A dimensional unit scaling type
@@ -441,7 +416,10 @@ subroutine PressureForce_blk_AFV_Bouss(h, tv, PFu, PFv, G, GV, US, CS, ALE_CSp, 
   real, dimension(SZI_(G),SZJ_(G)),          optional, intent(out) :: eta !< The bottom mass used to
                                                          !! calculate PFu and PFv [H ~> m or kg m-2], with any tidal
                                                          !! contributions or compressibility compensation.
+  type(MEKE_type),                          optional, pointer     :: MEKE   !< Pointer to a structure containing fields
+  type(VarMix_CS),                          optional, pointer     :: VarMix !< Variable mixing coefficients
   ! Local variables
+  real, dimension(SZI_(G),SZJ_(G),SZK_(G)+1) :: deltarho_eos ! patchy deltarho due to EOS [kg m-3].
   real, dimension(SZI_(G),SZJ_(G),SZK_(G)+1) :: e ! Interface height in depth units [Z ~> m].
   real, dimension(SZI_(G),SZJ_(G))  :: &
     e_tidal, &  ! The bottom geopotential anomaly due to tidal forces from
@@ -553,6 +531,8 @@ subroutine PressureForce_blk_AFV_Bouss(h, tv, PFu, PFv, G, GV, US, CS, ALE_CSp, 
   do j=Jsq,Jeq+1; do k=nz,1,-1 ; do i=Isq,Ieq+1
     e(i,j,K) = e(i,j,K+1) + h(i,j,k)*GV%H_to_Z
   enddo ; enddo ; enddo
+  
+  deltarho_eos(:,:,:) = 0.0                                                          
 
   if (use_EOS) then
 ! With a bulk mixed layer, replace the T & S of any layers that are
@@ -691,6 +671,10 @@ subroutine PressureForce_blk_AFV_Bouss(h, tv, PFu, PFv, G, GV, US, CS, ALE_CSp, 
                     dpa_bk, intz_dpa_bk, intx_dpa_bk, inty_dpa_bk, &
                     G%bathyT, dz_neglect, CS%useMassWghtInterp)
         endif
+        call int_density_dz_deltarho( e(:,:,K), e(:,:,K+1), deltarho_eos(:,:,k), &  
+                     deltarho_eos(:,:,k+1), GV%g_Earth, G%HI, G%Block(n), & 
+                     dpa_bk, intz_dpa_bk, intx_dpa_bk, inty_dpa_bk)     
+
         do jb=Jsq_bk,Jeq_bk+1 ; do ib=Isq_bk,Ieq_bk+1
           intz_dpa_bk(ib,jb) = intz_dpa_bk(ib,jb)*GV%Z_to_H
         enddo ; enddo
@@ -770,6 +754,8 @@ subroutine PressureForce_blk_AFV_Bouss(h, tv, PFu, PFv, G, GV, US, CS, ALE_CSp, 
   endif
 
   if (CS%id_e_tidal>0) call post_data(CS%id_e_tidal, e_tidal, CS%diag)
+  if (CS%id_deltarho3d>0) call post_data(CS%id_deltarho3d, deltarho_eos, CS%diag)
+  
 
 end subroutine PressureForce_blk_AFV_Bouss
 
@@ -838,6 +824,8 @@ subroutine PressureForce_blk_AFV_init(Time, G, GV, US, param_file, diag, CS, tid
     CS%id_e_tidal = register_diag_field('ocean_model', 'e_tidal', diag%axesT1, &
         Time, 'Tidal Forcing Astronomical and SAL Height Anomaly', 'meter', conversion=US%Z_to_m)
   endif
+  CS%id_deltarho3d = register_diag_field('ocean_model', 'MEKE_deltarho_eos', diag%axesTi, &
+          Time, 'MEKE derived patchy deltarho due to EOS 3d', 'kg m-3')
 
   CS%GFS_scale = 1.0
   if (GV%g_prime(1) /= GV%g_Earth) CS%GFS_scale = GV%g_prime(1) / GV%g_Earth

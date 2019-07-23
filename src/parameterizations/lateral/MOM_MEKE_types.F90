@@ -12,6 +12,7 @@ type, public :: MEKE_type
     GM_src => NULL(), & !< MEKE source due to thickness mixing (GM) [W m-2].
     mom_src => NULL(),& !< MEKE source from lateral friction in the momentum equations [W m-2].
     GME_snk => NULL(),& !< MEKE sink from GME backscatter in the momentum equations [W m-2].
+    deltarho_TW => NULL(), & ! The MEKE-derived Thermal Wind deltarho in kg m-3.
     Kh => NULL(), &     !< The MEKE-derived lateral mixing coefficient [m2 s-1].
     Kh_diff => NULL(), & !< Uses the non-MEKE-derived thickness diffusion coefficient to diffuse
                         !! MEKE [m2 s-1].

@@ -81,6 +81,7 @@ type, public :: MEKE_CS ; private
   type(diag_ctrl), pointer :: diag => NULL() !< A type that regulates diagnostics output
   !>@{ Diagnostic handles
   integer :: id_MEKE = -1, id_Ue = -1, id_Kh = -1, id_src = -1
+  integer :: id_deltarho_TW = -1
   integer :: id_Ub = -1, id_Ut = -1
   integer :: id_GM_src = -1, id_mom_src = -1, id_GME_snk = -1, id_decay = -1
   integer :: id_KhMEKE_u = -1, id_KhMEKE_v = -1, id_Ku = -1, id_Au = -1
@@ -142,6 +143,7 @@ subroutine step_forward_MEKE(MEKE, h, SN_u, SN_v, visc, dt, G, GV, US, CS, hu, h
     drag_vel_v      ! A (vertical) viscosity associated with bottom drag at
                     ! v-points [m s-1].
   real :: Kh_here, Inv_Kh_max, K4_here
+  real :: fcor
   real :: cdrag2
   real :: advFac
   real :: mass_neglect ! A negligible mass [kg m-2].
@@ -554,6 +556,18 @@ subroutine step_forward_MEKE(MEKE, h, SN_u, SN_v, visc, dt, G, GV, US, CS, hu, h
         endif
       endif
     endif
+    ! compute deltarho_TW for patchy parameterization                               
+!$OMP parallel do default(none) shared(is,ie,js,je,MEKE,LmixScale,CS,G,barotrFac2)
+    do j=js,je ; do i=is,ie                                                      
+       fcor = 0.25*US%s_to_T*((G%CoriolisBu(I,J) + G%CoriolisBu(I-1,J-1)) + &
+                              (G%CoriolisBu(I-1,J) + G%CoriolisBu(I,J-1))) ! Coriolis parameter at h points
+       ! fcor = 0.5*abs(fcor+abs(fcor))
+       fcor = abs(fcor)
+       MEKE%deltarho_TW(i,j) = (sqrt(2.*max(0.,MEKE%MEKE(i,j))) &                   
+                             *LmixScale(i,j)*GV%Rho0*fcor)                   &   
+                           ! /(GV%g_Earth*500.0)                                   
+                           /(GV%g_Earth*max(10.0,min(500.0,0.5*G%bathyT(i,j))))
+    enddo ; enddo                                                                
 
     ! Calculate viscosity for the main model to use
     if (CS%viscosity_coeff_Ku /=0.) then
@@ -576,6 +590,7 @@ subroutine step_forward_MEKE(MEKE, h, SN_u, SN_v, visc, dt, G, GV, US, CS, hu, h
 
     ! Offer fields for averaging.
     if (CS%id_MEKE>0) call post_data(CS%id_MEKE, MEKE%MEKE, CS%diag)
+    if (CS%id_deltarho_TW>0) call post_data(CS%id_deltarho_TW, MEKE%deltarho_TW, CS%diag)
     if (CS%id_Ue>0) call post_data(CS%id_Ue, sqrt(max(0.,2.0*MEKE%MEKE)), CS%diag)
     if (CS%id_Ub>0) call post_data(CS%id_Ub, sqrt(max(0.,2.0*MEKE%MEKE*bottomFac2)), CS%diag)
     if (CS%id_Ut>0) call post_data(CS%id_Ut, sqrt(max(0.,2.0*MEKE%MEKE*barotrFac2)), CS%diag)
@@ -1121,6 +1136,9 @@ logical function MEKE_init(Time, G, US, param_file, diag, CS, MEKE, restart_CS)
   CS%id_MEKE = register_diag_field('ocean_model', 'MEKE', diag%axesT1, Time, &
      'Mesoscale Eddy Kinetic Energy', 'm2 s-2')
   if (.not. associated(MEKE%MEKE)) CS%id_MEKE = -1
+  CS%id_deltarho_TW = register_diag_field('ocean_model', 'MEKE_deltarho_TW', diag%axesT1, Time, &
+          'MEKE derived Thermal Wind delta rho', 'kg m-3') 
+  if (.not. associated(MEKE%deltarho_TW)) CS%id_deltarho_TW = -1
   CS%id_Kh = register_diag_field('ocean_model', 'MEKE_KH', diag%axesT1, Time, &
      'MEKE derived diffusivity', 'm2 s-1')
   if (.not. associated(MEKE%Kh)) CS%id_Kh = -1
@@ -1255,6 +1273,10 @@ subroutine MEKE_alloc_register_restart(HI, param_file, MEKE, restart_CS)
   vd = var_desc("MEKE", "m2 s-2", hor_grid='h', z_grid='1', &
            longname="Mesoscale Eddy Kinetic Energy")
   call register_restart_field(MEKE%MEKE, vd, .false., restart_CS)
+  allocate(MEKE%deltarho_TW(isd:ied,jsd:jed)) ; MEKE%deltarho_TW(:,:) = 0.0
+  vd = var_desc("MEKE_deltarho_TW", "kg m-3",hor_grid='h',z_grid='1', & 
+          longname="Thermal Wind deltarho from Mesoscale Eddy Kinetic Energy")
+  call register_restart_field(MEKE%deltarho_TW, vd, .false., restart_CS)
   if (MEKE_GMcoeff>=0.) then
     allocate(MEKE%GM_src(isd:ied,jsd:jed)) ; MEKE%GM_src(:,:) = 0.0
   endif
@@ -1304,6 +1326,7 @@ subroutine MEKE_end(MEKE, CS)
   if (.not.associated(MEKE)) return
 
   if (associated(MEKE%MEKE)) deallocate(MEKE%MEKE)
+  if (associated(MEKE%deltarho_TW)) deallocate(MEKE%deltarho_TW)
   if (associated(MEKE%GM_src)) deallocate(MEKE%GM_src)
   if (associated(MEKE%mom_src)) deallocate(MEKE%mom_src)
   if (associated(MEKE%GME_snk)) deallocate(MEKE%GME_snk)

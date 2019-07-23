@@ -44,6 +44,7 @@ public EOS_use_linear, calculate_spec_vol
 public int_density_dz, int_specific_vol_dp
 public int_density_dz_generic_plm, int_density_dz_generic_ppm
 public int_spec_vol_dp_generic_plm !, int_spec_vol_dz_generic_ppm
+public int_density_dz_deltarho
 public int_density_dz_generic, int_spec_vol_dp_generic
 public find_depth_of_pressure_in_cell
 public calculate_TFreeze
@@ -1063,6 +1064,139 @@ subroutine int_density_dz_generic(T, S, z_t, z_b, rho_ref, rho_0, G_e, HII, HIO,
   enddo ; enddo ; endif
 end subroutine int_density_dz_generic
 
+subroutine int_density_dz_deltarho(z_t, z_b, drho_t, drho_b, G_e, HII, HIO, &
+                                   dpa, intz_dpa, intx_dpa, inty_dpa)
+  type(hor_index_type), intent(in)  :: HII, HIO
+  real, dimension(HII%isd:HII%ied,HII%jsd:HII%jed), &
+                        intent(in)  :: z_t, z_b, drho_t, drho_b
+  real,                 intent(in)  :: G_e
+  real, dimension(HIO%isd:HIO%ied,HIO%jsd:HIO%jed), &
+                        intent(inout) :: dpa
+  real, dimension(HIO%isd:HIO%ied,HIO%jsd:HIO%jed), &
+              optional, intent(inout) :: intz_dpa
+  real, dimension(HIO%IsdB:HIO%IedB,HIO%jsd:HIO%jed), &
+              optional, intent(inout) :: intx_dpa
+  real, dimension(HIO%isd:HIO%ied,HIO%JsdB:HIO%JedB), &
+              optional, intent(inout) :: inty_dpa
+!   This subroutine calculates (by numerical quadrature) integrals of
+! pressure anomalies across layers, which are required for calculating the
+! finite-volume form pressure accelerations in a Boussinesq model.  The one
+! potentially dodgy assumtion here is that rho_0 is used both in the denominator
+! of the accelerations, and in the pressure used to calculated density (the
+! latter being -z*rho_0*G_e).  These two uses could be separated if need be.
+!
+! Arguments:
+!  (in)      z_t - height at the top of the layer in m.
+!  (in)      z_b - height at the top of the layer in m.
+!  (in)      rho_ref - A mean density, in kg m-3, that is subtracted out to reduce
+!                    the magnitude of each of the integrals.
+!                    (The pressure is calucated as p~=-z*rho_0*G_e.)
+!  (in)      rho_0 - A density, in kg m-3, that is used to calculate the pressure
+!                    (as p~=-z*rho_0*G_e) used in the equation of state.
+!  (in)      G_e - The Earth's gravitational acceleration, in m s-2.
+!  (out)     dpa - The change in the pressure anomaly across the layer,
+!                  in Pa.
+!  (out,opt) intz_dpa - The integral through the thickness of the layer of the
+!                       pressure anomaly relative to the anomaly at the top of
+!                       the layer, in Pa m.
+!  (out,opt) intx_dpa - The integral in x of the difference between the
+!                       pressure anomaly at the top and bottom of the layer
+!                       divided by the x grid spacing, in Pa.
+!  (out,opt) inty_dpa - The integral in y of the difference between the
+!                       pressure anomaly at the top and bottom of the layer
+!                       divided by the y grid spacing, in Pa.
+
+  real, dimension(HIO%isd:HIO%ied,HIO%jsd:HIO%jed) :: dpatmp
+  real :: r5(5)
+  real :: rho_anom
+  real :: w_left, w_right, intz(5)
+  real, parameter :: C1_90 = 1.0/90.0  ! Rational constants.
+  real :: dz, dr
+  integer :: Isq, Ieq, Jsq, Jeq, i, j, m, n
+  integer :: iin, jin, ioff, joff
+
+  ioff = HIO%idg_offset - HII%idg_offset
+  joff = HIO%jdg_offset - HII%jdg_offset
+
+  ! These array bounds work for the indexing convention of the input arrays, but
+  ! on the computational domain defined for the output arrays.
+  ! on the computational domain defined for the output arrays.
+  !!! Isq = HIO%IscB + ioff ; Ieq = HIO%IecB + ioff
+  !!! Jsq = HIO%JscB + joff ; Jeq = HIO%JecB + joff
+  !!! is = HIO%isc + ioff ; ie = HIO%iec + ioff
+  !!! js = HIO%jsc + joff ; je = HIO%jec + joff
+
+  Isq = HIO%IscB ; Ieq = HIO%IecB ; Jsq = HIO%JscB ; Jeq = HIO%JecB
+
+  do j=Jsq,Jeq+1 
+    jin = j+joff
+    do i=Isq,Ieq+1 ; iin = i+ioff
+      dz = z_t(iin,jin) - z_b(iin,jin)
+      dr = drho_t(iin,jin) - drho_b(iin,jin)
+      do n=1,5
+        r5(n) = (drho_t(iin,jin) - 0.25*real(n-1)*dr)
+      enddo
+
+      ! Use Bode's rule to estimate the pressure anomaly change.
+      rho_anom = C1_90*(7.0*(r5(1)+r5(5)) + 32.0*(r5(2)+r5(4)) + 12.0*r5(3)) 
+      dpatmp(i,j) = G_e*dz*rho_anom
+      dpa(i,j) = dpa(i,j) + G_e*dz*rho_anom
+      if (present(intz_dpa)) then
+      ! Use a Bode's-rule-like fifth-order accurate estimate of the double integral of
+      ! the pressure anomaly.
+          intz_dpa(i,j) = intz_dpa(i,j) + 0.5*G_e*dz**2 * &
+          (rho_anom - C1_90*(16.0*(r5(4)-r5(2)) + 7.0*(r5(5)-r5(1))) )
+      endif
+  enddo ; enddo
+
+  if (present(intx_dpa)) then ; do j=HIO%jsc,HIO%jec ; jin = j+joff
+    do I=Isq,Ieq ; iin = i+ioff 
+      intz(1) = dpatmp(i,j) ; intz(5) = dpatmp(i+1,j)
+      ! intz(1) = dpa(i,j) ; intz(5) = dpa(i+1,j)
+      do m=2,4
+        w_left = 0.25*real(5-m) ; w_right = 1.0-w_left
+        dz = w_left*(z_t(iin,jin) - z_b(iin,jin)) + w_right*(z_t(iin+1,jin) - z_b(iin+1,jin))
+        dr = w_left*(drho_t(iin,jin) - drho_b(iin,jin)) + w_right*(drho_t(iin+1,jin) - drho_b(iin+1,jin))
+        r5(1) = (w_left*drho_t(iin,jin) + w_right*drho_t(iin+1,jin))
+        do n=2,5
+          r5(n) = r5(n-1) + 0.25*dr
+        enddo
+
+        ! Use Bode's rule to estimate the pressure anomaly change.
+        intz(m) = G_e*dz*( C1_90*(7.0*(r5(1)+r5(5)) + 32.0*(r5(2)+r5(4)) + &
+                                  12.0*r5(3)))
+      enddo
+      ! Use Bode's rule to integrate the bottom pressure anomaly values in x.
+      intx_dpa(i,j) = intx_dpa(i,j) + & 
+              C1_90*(7.0*(intz(1)+intz(5)) + 32.0*(intz(2)+intz(4)) + &
+                             12.0*intz(3))
+    enddo  
+  enddo ; endif
+
+  if (present(inty_dpa)) then ; do J=Jsq,Jeq ; jin = j+joff
+    do i=HIO%isc,HIO%iec ; iin = i+ioff 
+      intz(1) = dpatmp(i,j) ; intz(5) = dpatmp(i,j+1)
+      ! intz(1) = dpa(i,j) ; intz(5) = dpa(i,j+1)
+      do m=2,4
+        w_left = 0.25*real(5-m) ; w_right = 1.0-w_left
+        dz = w_left*(z_t(iin,jin) - z_b(iin,jin)) + w_right*(z_t(iin,jin+1) - z_b(iin,jin+1))
+        dr = w_left*(drho_t(iin,jin) - drho_b(iin,jin)) + w_right*(drho_t(iin,jin+1) - drho_b(iin,jin+1))
+        r5(1) = (w_left*drho_t(iin,jin) + w_right*drho_t(iin,jin+1))
+        do n=2,5
+          r5(n) = r5(n-1) + 0.25*dr
+        enddo
+
+        ! Use Bode's rule to estimate the pressure anomaly change.
+        intz(m) = G_e*dz*( C1_90*(7.0*(r5(1)+r5(5)) + 32.0*(r5(2)+r5(4)) + &
+                                  12.0*r5(3)))
+      enddo
+      ! Use Bode's rule to integrate the values.
+      inty_dpa(i,j) = inty_dpa(i,j) + &
+              C1_90*(7.0*(intz(1)+intz(5)) + 32.0*(intz(2)+intz(4)) + &
+                             12.0*intz(3))
+    enddo 
+  enddo ; endif
+end subroutine int_density_dz_deltarho
 
 ! ==========================================================================
 !> Compute pressure gradient force integrals by quadrature for the case where

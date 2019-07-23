@@ -21,6 +21,8 @@ use MOM_unit_scaling, only : unit_scale_type
 use MOM_variables, only : thermo_var_ptrs
 use MOM_verticalGrid, only : verticalGrid_type
 use MOM_ALE, only: ALE_CS
+use MOM_MEKE_types, only : MEKE_type
+use MOM_lateral_mixing_coeffs, only : VarMix_CS
 implicit none ; private
 
 #include <MOM_memory.h>
@@ -44,7 +46,7 @@ end type PressureForce_CS
 contains
 
 !> A thin layer between the model and the Boussinesq and non-Boussinesq pressure force routines.
-subroutine PressureForce(h, tv, PFu, PFv, G, GV, US, CS, ALE_CSp, p_atm, pbce, eta)
+subroutine PressureForce(h, tv, PFu, PFv, G, GV, US, CS, ALE_CSp, p_atm, pbce, eta, MEKE, VarMix)
   type(ocean_grid_type),   intent(in)  :: G    !< The ocean's grid structure
   type(verticalGrid_type), intent(in)  :: GV   !< The ocean's vertical grid structure
   type(unit_scale_type),   intent(in)  :: US   !< A dimensional unit scaling type
@@ -66,11 +68,13 @@ subroutine PressureForce(h, tv, PFu, PFv, G, GV, US, CS, ALE_CSp, p_atm, pbce, e
   real, dimension(SZI_(G),SZJ_(G)), &
                  optional, intent(out) :: eta  !< The bottom mass used to calculate PFu and PFv,
                                                !! [H ~> m or kg m-2], with any tidal contributions.
+  type(MEKE_type), optional, pointer   :: MEKE   !< Pointer to a structure containing fields
+  type(VarMix_CS), optional, pointer   :: VarMix !< Variable mixing coefficients  
 
   if (CS%Analytic_FV_PGF .and. CS%blocked_AFV) then
     if (GV%Boussinesq) then
       call PressureForce_blk_AFV_Bouss(h, tv, PFu, PFv, G, GV, US, &
-               CS%PressureForce_blk_AFV_CSp, ALE_CSp, p_atm, pbce, eta)
+               CS%PressureForce_blk_AFV_CSp, ALE_CSp, p_atm, pbce, eta, MEKE=MEKE, VarMix=VarMix)
     else
       call PressureForce_blk_AFV_nonBouss(h, tv, PFu, PFv, G, GV, US, &
                CS%PressureForce_blk_AFV_CSp, p_atm, pbce, eta)
@@ -78,7 +82,7 @@ subroutine PressureForce(h, tv, PFu, PFv, G, GV, US, CS, ALE_CSp, p_atm, pbce, e
   elseif (CS%Analytic_FV_PGF) then
     if (GV%Boussinesq) then
       call PressureForce_AFV_Bouss(h, tv, PFu, PFv, G, GV, US, CS%PressureForce_AFV_CSp, &
-                                   ALE_CSp, p_atm, pbce, eta)
+                                   ALE_CSp, p_atm, pbce, eta, MEKE=MEKE, VarMix=VarMix)
     else
       call PressureForce_AFV_nonBouss(h, tv, PFu, PFv, G, GV, US, CS%PressureForce_AFV_CSp, &
                                       ALE_CSp, p_atm, pbce, eta)
