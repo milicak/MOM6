@@ -61,6 +61,7 @@ type, public :: PressureForce_AFV_CS ; private
 
   integer :: id_e_tidal = -1 !< Diagnostic identifier
   integer :: id_deltarho3d = -1 ! Diagnostic for deltarho_eos
+  integer :: id_bcorr = -1 ! Diagnostic for deltarho_eos
   type(tidal_forcing_CS), pointer :: tides_CSp => NULL() !< Tides control structure
 end type PressureForce_AFV_CS
 
@@ -440,6 +441,7 @@ subroutine PressureForce_AFV_Bouss(h, tv, PFu, PFv, G, GV, US, CS, ALE_CSp, p_at
   type(VarMix_CS),                          optional, pointer     :: VarMix !< Variable mixing coefficients
   ! Local variables
   real, dimension(SZI_(G),SZJ_(G),SZK_(G)+1) :: deltarho_eos ! patchy deltarho due to EOS [kg m-3].
+  real, dimension(SZI_(G),SZJ_(G),SZK_(G)+1) :: bcorr3d ! patchy deltarho due to EOS [kg m-3].
   real, dimension(SZI_(G)) :: press ! pressure at each interface (Pa)            
   real :: cff_drho, cff1       ! coefficient forpatchy deltarho parameterization      
   real :: Ttmp(SZI_(G))        ! Interface temperature in C.                     
@@ -504,7 +506,7 @@ subroutine PressureForce_AFV_Bouss(h, tv, PFu, PFv, G, GV, US, CS, ALE_CSp, p_at
   real, parameter :: C1_6 = 1.0/6.0
   real, parameter :: C1_8 = 1.0/8.0
   real :: bcorr              ! correlation coeff. 
-  real :: Tl(10), Sl(10), hl(10) ! Copies of local stencil
+  real :: Tl(10), Sl(10), hl(10), Rhl(10) ! Copies of local stencil
   real :: mn_S, mn_T, mn_ST, mn_T2, mn_H
   integer :: is, ie, js, je, Isq, Ieq, Jsq, Jeq, nz, nkmb
   integer :: i, j, k
@@ -567,6 +569,7 @@ subroutine PressureForce_AFV_Bouss(h, tv, PFu, PFv, G, GV, US, CS, ALE_CSp, p_at
 
   cff_drho = 25.0*(-0.01/8.0)                                                   
   deltarho_eos(:,:,:) = 0.0                                                          
+  bcorr3d(:,:,:) = 0.0                                                          
   do j=Jsq,Jeq+1                                                                 
     do k=1,nz                                                                    
       km1 = max(1,k-1)
@@ -583,19 +586,16 @@ subroutine PressureForce_AFV_Bouss(h, tv, PFu, PFv, G, GV, US, CS, ALE_CSp, p_at
          bcorr = 0.0
          Tl(1) = tv%T(i,j,k)   ; Tl(2) = tv%T(i-1,j,k) ; Tl(3) = tv%T(i+1,j,k) 
          Tl(4) = tv%T(i,j-1,k) ; Tl(5) = tv%T(i,j+1,k)
-
          Tl(6) = tv%T(i,j,km1)   ; Tl(7) = tv%T(i-1,j,km1) ; Tl(8) = tv%T(i+1,j,km1) 
          Tl(9) = tv%T(i,j-1,km1) ; Tl(10) = tv%T(i,j+1,km1)
 
          Sl(1) = tv%S(i,j,k)   ; Sl(2) = tv%S(i-1,j,k) ; Sl(3) = tv%S(i+1,j,k) 
          Sl(4) = tv%S(i,j-1,k) ; Sl(5) = tv%S(i,j+1,k)
-         
          Sl(6) = tv%S(i,j,km1)   ; Sl(7) = tv%S(i-1,j,km1) ; Sl(8) = tv%S(i+1,j,km1) 
          Sl(9) = tv%S(i,j-1,km1) ; Sl(10) = tv%S(i,j+1,km1)
 
          hl(1) = h(i,j,k)      ; hl(2) = h(i-1,j,k)    ; hl(3) = h(i+1,j,k) 
          hl(4) = h(i,j-1,k)    ; hl(5) = h(i,j+1,k)
-         
          hl(6) = h(i,j,km1)      ; hl(7) = h(i-1,j,km1)    ; hl(8) = h(i+1,j,km1) 
          hl(9) = h(i,j-1,km1)    ; hl(10) = h(i,j+1,km1)
 
@@ -610,6 +610,12 @@ subroutine PressureForce_AFV_Bouss(h, tv, PFu, PFv, G, GV, US, CS, ALE_CSp, p_at
          ! Adjust S,T vectors to have zero mean
          Sl(:) = Sl(:) - mn_S ; mn_S = 0.
          Tl(:) = Tl(:) - mn_T ; mn_T = 0.
+         Rhl(1) = (drho_dT(i)*Tl(1)+drho_dS(i)*Sl(1)) ; Rhl(2) = (drho_dT(i)*Tl(2)+drho_dS(i)*Sl(2))
+         Rhl(3) = (drho_dT(i)*Tl(3)+drho_dS(i)*Sl(3)) ; Rhl(4) = (drho_dT(i)*Tl(4)+drho_dS(i)*Sl(4))
+         Rhl(5) = (drho_dT(i)*Tl(5)+drho_dS(i)*Sl(5)) ; Rhl(6) = (drho_dT(i)*Tl(6)+drho_dS(i)*Sl(6))
+         Rhl(7) = (drho_dT(i)*Tl(7)+drho_dS(i)*Sl(7)) ; Rhl(8) = (drho_dT(i)*Tl(8)+drho_dS(i)*Sl(8))
+         Rhl(8) = (drho_dT(i)*Tl(9)+drho_dS(i)*Sl(9)) ; Rhl(10) = (drho_dT(i)*Tl(10)+drho_dS(i)*Sl(10))
+
          ! Variance of T (or mean square error if mean is removed above)
          mn_T2 = ( hl(1)*Tl(1)*Tl(1) + ( ( hl(2)*Tl(2)*Tl(2) + hl(3)*Tl(3)*Tl(3) )   &
                                        + ( hl(4)*Tl(4)*Tl(4) + hl(5)*Tl(5)*Tl(5) ) ) &
@@ -622,27 +628,27 @@ subroutine PressureForce_AFV_Bouss(h, tv, PFu, PFv, G, GV, US, CS, ALE_CSp, p_at
                  + hl(6)*Sl(6)*Tl(6) + ( ( hl(7)*Sl(7)*Tl(7) + hl(8)*Sl(8)*Tl(8) )   &
                                        + ( hl(9)*Sl(9)*Tl(9) + hl(10)*Sl(10)*Tl(10) ) ) ) * mn_H
 
-         cff1 =( hl(1)*((drho_dT(i)*Tl(1)-drho_dS(i)*Sl(1)))**2 +     &
-                ( (hl(2)*((drho_dT(i)*Tl(2)-drho_dS(i)*Sl(2)))**2 +   &
-                   hl(3)*((drho_dT(i)*Tl(3)-drho_dS(i)*Sl(3)))**2 ) + &
-                  (hl(4)*((drho_dT(i)*Tl(4)-drho_dS(i)*Sl(4)))**2 +   & 
-                   hl(5)*((drho_dT(i)*Tl(5)-drho_dS(i)*Sl(5)))**2 ) ) &
-               + hl(6)*((drho_dT(i)*Tl(6)-drho_dS(i)*Sl(6)))**2 +     &
-                ( (hl(7)*((drho_dT(i)*Tl(7)-drho_dS(i)*Sl(7)))**2 +   &
-                   hl(8)*((drho_dT(i)*Tl(8)-drho_dS(i)*Sl(8)))**2 ) + &
-                  (hl(9)*((drho_dT(i)*Tl(9)-drho_dS(i)*Sl(9)))**2 +   & 
-                   hl(10)*((drho_dT(i)*Tl(10)-drho_dS(i)*Sl(10)))**2 ) ) )*mn_H
+         cff1 = ( hl(1)*Rhl(1)*Rhl(1) + ( ( hl(2)*Rhl(2)*Rhl(2) + hl(3)*Rhl(3)*Rhl(3) )   &
+                                        + ( hl(4)*Rhl(4)*Rhl(4) + hl(5)*Rhl(5)*Rhl(5) ) ) & 
+                + hl(6)*Rhl(6)*Rhl(6) + ( ( hl(7)*Rhl(7)*Rhl(7) + hl(8)*Rhl(8)*Rhl(8) )   &
+                                        + ( hl(9)*Rhl(9)*Rhl(9) + hl(10)*Rhl(10)*Rhl(10) ) ) ) * mn_H
 
-         if(abs(cff1)> 0.) bcorr = ((drho_dT(i)*mn_T2)-(drho_dS(i)*mn_ST)) / cff1
+         if(abs(cff1)> 0.) bcorr = ((drho_dT(i)*mn_T2)+(drho_dS(i)*mn_ST)) / cff1
 
-         ! deltarho_eos(i,j,k) = max(-2.0, &                     
-                  ! cff_drho*(MEKE%deltarho_TW(i,j)**2)*(bcorr**2) * &           
-                  ! 5.0*C1_8*drho_dT_dT(i)*(MEKE%deltarho_TW(i,j)**2)*(bcorr**2) * &           
-                  ! (0.5*(VarMix%ebt_struct(i,j,k)+VarMix%ebt_struct(i,j,km1)))**2 )
-
-         deltarho_eos(i,j,k) = max(-2.0, &                      
-             -0.5*MEKE%deltarho_TW(i,j) * &                                         
-            (0.5*(VarMix%ebt_struct(i,j,k)+VarMix%ebt_struct(i,j,km1)))**2 )
+         bcorr3d(i,j,k) = bcorr
+         deltarho_eos(i,j,k) = max(-2.0, &                     
+                  20.0*C1_8*drho_dT_dT(i)*(MEKE%deltarho_TW(i,j)**2)*(bcorr**2) * &     
+                  (0.5*(VarMix%ebt_struct(i,j,k)+VarMix%ebt_struct(i,j,km1))) )
+         !deltarho_eos(i,j,k) = max(-2.0, &                     
+         !         ! cff_drho*(MEKE%deltarho_TW(i,j)**2)*(bcorr**2) * &           
+         !         ! 100.0*(MEKE%Rd_dx_h(i,j)**2)*C1_8*drho_dT_dT(i)*(MEKE%deltarho_TW(i,j)**2)*(bcorr**2) * &           
+         !         10.0*C1_8*drho_dT_dT(i)*(MEKE%deltarho_TW(i,j)**2)*(bcorr**2) * &          !! This is GOOD !! 
+         !         ! (MEKE%Rd_dx_h(i,j)**2)*C1_8*drho_dT_dT(i)*(MEKE%deltarho_TW(i,j)**2)*(bcorr**2) * &       
+         !         ! 5.0*C1_8*drho_dT_dT(i)*(MEKE%deltarho_TW(i,j)**2)/(drho_dT(i)**2) * &           
+         !         ! 5.0*C1_8*drho_dT_dT(i)*(MEKE%deltarho_TW(i,j)**2)*(15**2) * &           
+         !         ! -0.25*MEKE%deltarho_TW(i,j) * &                                         
+         !         ! (0.5*(VarMix%ebt_struct(i,j,k)+VarMix%ebt_struct(i,j,km1)))**2 )
+         !         (0.5*(VarMix%ebt_struct(i,j,k)+VarMix%ebt_struct(i,j,km1))) )
 
       enddo                                                                      
     enddo                                                                        
@@ -860,6 +866,7 @@ subroutine PressureForce_AFV_Bouss(h, tv, PFu, PFv, G, GV, US, CS, ALE_CSp, p_at
 
   if (CS%id_e_tidal>0) call post_data(CS%id_e_tidal, e_tidal, CS%diag)
   if (CS%id_deltarho3d>0) call post_data(CS%id_deltarho3d, deltarho_eos, CS%diag)
+  if (CS%id_bcorr>0) call post_data(CS%id_bcorr, bcorr3d, CS%diag)
 
 end subroutine PressureForce_AFV_Bouss
 
@@ -930,6 +937,8 @@ subroutine PressureForce_AFV_init(Time, G, GV, US, param_file, diag, CS, tides_C
   endif
   CS%id_deltarho3d = register_diag_field('ocean_model', 'MEKE_deltarho_eos', diag%axesTi, &
           Time, 'MEKE derived patchy deltarho due to EOS in 3d', 'kg m-3')
+  CS%id_bcorr = register_diag_field('ocean_model', 'MEKE_bcorr', diag%axesTi, &
+          Time, 'MEKE derived patchy corr due to EOS in 3d', 'kg m-3')
 
   CS%GFS_scale = 1.0
   if (GV%g_prime(1) /= GV%g_Earth) CS%GFS_scale = GV%g_prime(1) / GV%g_Earth

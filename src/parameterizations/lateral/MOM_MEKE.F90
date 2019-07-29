@@ -566,7 +566,7 @@ subroutine step_forward_MEKE(MEKE, h, SN_u, SN_v, visc, dt, G, GV, US, CS, hu, h
        MEKE%deltarho_TW(i,j) = (sqrt(2.*max(0.,MEKE%MEKE(i,j))) &                   
                              *LmixScale(i,j)*GV%Rho0*fcor)                   &   
                            ! /(GV%g_Earth*500.0)                                   
-                           /(GV%g_Earth*max(10.0,min(500.0,0.5*G%bathyT(i,j))))
+                           /(GV%g_Earth*max(10.0,min(500.0,G%bathyT(i,j))))
     enddo ; enddo                                                                
 
     ! Calculate viscosity for the main model to use
