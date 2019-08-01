@@ -443,7 +443,7 @@ subroutine PressureForce_AFV_Bouss(h, tv, PFu, PFv, G, GV, US, CS, ALE_CSp, p_at
   real, dimension(SZI_(G),SZJ_(G),SZK_(G)+1) :: deltarho_eos ! patchy deltarho due to EOS [kg m-3].
   real, dimension(SZI_(G),SZJ_(G),SZK_(G)+1) :: bcorr3d ! patchy deltarho due to EOS [kg m-3].
   real, dimension(SZI_(G)) :: press ! pressure at each interface (Pa)            
-  real :: cff_drho, cff1       ! coefficient forpatchy deltarho parameterization      
+  real :: cff1       ! coefficient forpatchy deltarho parameterization      
   real :: Ttmp(SZI_(G))        ! Interface temperature in C.                     
   real :: Stmp(SZI_(G))        ! Interface salinity in PSU.                      
   real :: drho_dT(SZI_(G))     ! Partial derivatives of density with temperature 
@@ -505,6 +505,7 @@ subroutine PressureForce_AFV_Bouss(h, tv, PFu, PFv, G, GV, US, CS, ALE_CSp, p_at
 
   real, parameter :: C1_6 = 1.0/6.0
   real, parameter :: C1_8 = 1.0/8.0
+  logical :: use_deltarho_eos       ! If true, use the deltarho due to nonlinear EOS.
   real :: bcorr              ! correlation coeff. 
   real :: Tl(10), Sl(10), hl(10), Rhl(10) ! Copies of local stencil
   real :: mn_S, mn_T, mn_ST, mn_T2, mn_H
@@ -519,6 +520,8 @@ subroutine PressureForce_AFV_Bouss(h, tv, PFu, PFv, G, GV, US, CS, ALE_CSp, p_at
   if (.not.associated(CS)) call MOM_error(FATAL, &
        "MOM_PressureForce_AFV_Bouss: Module must be initialized before it is used.")
 
+  use_deltarho_eos = .false.
+  if (associated(MEKE%deltarho_TW)) use_deltarho_eos = .true.
   use_p_atm = .false.
   if (present(p_atm)) then ; if (associated(p_atm)) use_p_atm = .true. ; endif
   use_EOS = associated(tv%eqn_of_state)
@@ -567,92 +570,83 @@ subroutine PressureForce_AFV_Bouss(h, tv, PFu, PFv, G, GV, US, CS, ALE_CSp, p_at
     e(i,j,K) = e(i,j,K+1) + h(i,j,k)*GV%H_to_Z
   enddo ; enddo ; enddo
 
-  cff_drho = 25.0*(-0.01/8.0)                                                   
   deltarho_eos(:,:,:) = 0.0                                                          
   bcorr3d(:,:,:) = 0.0                                                          
-  do j=Jsq,Jeq+1                                                                 
-    do k=1,nz                                                                    
-      km1 = max(1,k-1)
-      do i=Isq,Ieq+1                                                             
-        press(i) = -GV%Rho0*GV%g_Earth*e(i,j,k)                                  
-        Ttmp(i) = 0.5*(tv%T(i,j,km1)+tv%T(i,j,k))                                
-        Stmp(i) = 0.5*(tv%S(i,j,km1)+tv%S(i,j,k))                                
-      enddo                                                                      
-      call calculate_density_derivs(Ttmp, Stmp, press, drho_dT, &                
-                       drho_dS, Isq, Ieq-Isq+2, tv%eqn_of_state)                 
-      call calculate_density_second_derivs(Ttmp, Stmp, press, drho_dS_dS, drho_dS_dT, drho_dT_dT, &                
-                       drho_dS_dP, drho_dT_dP, Isq, Ieq-Isq+2, tv%eqn_of_state)                 
-      do i=Isq,Ieq+1                                                             
-         bcorr = 0.0
-         Tl(1) = tv%T(i,j,k)   ; Tl(2) = tv%T(i-1,j,k) ; Tl(3) = tv%T(i+1,j,k) 
-         Tl(4) = tv%T(i,j-1,k) ; Tl(5) = tv%T(i,j+1,k)
-         Tl(6) = tv%T(i,j,km1)   ; Tl(7) = tv%T(i-1,j,km1) ; Tl(8) = tv%T(i+1,j,km1) 
-         Tl(9) = tv%T(i,j-1,km1) ; Tl(10) = tv%T(i,j+1,km1)
+  if (use_deltarho_eos) then
+    do j=Jsq,Jeq+1                                                                 
+      do k=1,nz                                                                    
+        km1 = max(1,k-1)
+        do i=Isq,Ieq+1                                                             
+          press(i) = -GV%Rho0*GV%g_Earth*e(i,j,k)                                  
+          Ttmp(i) = 0.5*(tv%T(i,j,km1)+tv%T(i,j,k))                                
+          Stmp(i) = 0.5*(tv%S(i,j,km1)+tv%S(i,j,k))                                
+        enddo                                                                      
+        call calculate_density_derivs(Ttmp, Stmp, press, drho_dT, &                
+                         drho_dS, Isq, Ieq-Isq+2, tv%eqn_of_state)                 
+        call calculate_density_second_derivs(Ttmp, Stmp, press, drho_dS_dS, drho_dS_dT, drho_dT_dT, &                
+                         drho_dS_dP, drho_dT_dP, Isq, Ieq-Isq+2, tv%eqn_of_state)                 
+        do i=Isq,Ieq+1                                                             
+           bcorr = 0.0
+           Tl(1) = tv%T(i,j,k)   ; Tl(2) = tv%T(i-1,j,k) ; Tl(3) = tv%T(i+1,j,k) 
+           Tl(4) = tv%T(i,j-1,k) ; Tl(5) = tv%T(i,j+1,k)
+           Tl(6) = tv%T(i,j,km1)   ; Tl(7) = tv%T(i-1,j,km1) ; Tl(8) = tv%T(i+1,j,km1) 
+           Tl(9) = tv%T(i,j-1,km1) ; Tl(10) = tv%T(i,j+1,km1)
 
-         Sl(1) = tv%S(i,j,k)   ; Sl(2) = tv%S(i-1,j,k) ; Sl(3) = tv%S(i+1,j,k) 
-         Sl(4) = tv%S(i,j-1,k) ; Sl(5) = tv%S(i,j+1,k)
-         Sl(6) = tv%S(i,j,km1)   ; Sl(7) = tv%S(i-1,j,km1) ; Sl(8) = tv%S(i+1,j,km1) 
-         Sl(9) = tv%S(i,j-1,km1) ; Sl(10) = tv%S(i,j+1,km1)
+           Sl(1) = tv%S(i,j,k)   ; Sl(2) = tv%S(i-1,j,k) ; Sl(3) = tv%S(i+1,j,k) 
+           Sl(4) = tv%S(i,j-1,k) ; Sl(5) = tv%S(i,j+1,k)
+           Sl(6) = tv%S(i,j,km1)   ; Sl(7) = tv%S(i-1,j,km1) ; Sl(8) = tv%S(i+1,j,km1) 
+           Sl(9) = tv%S(i,j-1,km1) ; Sl(10) = tv%S(i,j+1,km1)
 
-         hl(1) = h(i,j,k)      ; hl(2) = h(i-1,j,k)    ; hl(3) = h(i+1,j,k) 
-         hl(4) = h(i,j-1,k)    ; hl(5) = h(i,j+1,k)
-         hl(6) = h(i,j,km1)      ; hl(7) = h(i-1,j,km1)    ; hl(8) = h(i+1,j,km1) 
-         hl(9) = h(i,j-1,km1)    ; hl(10) = h(i,j+1,km1)
+           hl(1) = h(i,j,k)      ; hl(2) = h(i-1,j,k)    ; hl(3) = h(i+1,j,k) 
+           hl(4) = h(i,j-1,k)    ; hl(5) = h(i,j+1,k)
+           hl(6) = h(i,j,km1)      ; hl(7) = h(i-1,j,km1)    ; hl(8) = h(i+1,j,km1) 
+           hl(9) = h(i,j-1,km1)    ; hl(10) = h(i,j+1,km1)
 
-         mn_H = hl(1) + ( ( hl(2) + hl(3) ) + ( hl(4) + hl(5) ) ) &
-              + hl(6) + ( ( hl(7) + hl(8) ) + ( hl(9) + hl(10) ) )
-         if (mn_H>0.) mn_H = 1. / mn_H ! Hereafter, mn_H is the reciprocal of mean h for the stencil
-         ! Mean of S,T
-         mn_S = ( hl(1)*Sl(1) + ( ( hl(2)*Sl(2) + hl(3)*Sl(3) ) + ( hl(4)*Sl(4) + hl(5)*Sl(5) ) ) & 
-                + hl(6)*Sl(6) + ( ( hl(7)*Sl(7) + hl(8)*Sl(8) ) + ( hl(9)*Sl(9) + hl(10)*Sl(10) ) ) ) * mn_H
-         mn_T = ( hl(1)*Tl(1) + ( ( hl(2)*Tl(2) + hl(3)*Tl(3) ) + ( hl(4)*Tl(4) + hl(5)*Tl(5) ) ) &
-                + hl(6)*Tl(6) + ( ( hl(7)*Tl(7) + hl(8)*Tl(8) ) + ( hl(9)*Tl(9) + hl(10)*Tl(10) ) ) ) * mn_H
-         ! Adjust S,T vectors to have zero mean
-         Sl(:) = Sl(:) - mn_S ; mn_S = 0.
-         Tl(:) = Tl(:) - mn_T ; mn_T = 0.
-         Rhl(1) = (drho_dT(i)*Tl(1)+drho_dS(i)*Sl(1)) ; Rhl(2) = (drho_dT(i)*Tl(2)+drho_dS(i)*Sl(2))
-         Rhl(3) = (drho_dT(i)*Tl(3)+drho_dS(i)*Sl(3)) ; Rhl(4) = (drho_dT(i)*Tl(4)+drho_dS(i)*Sl(4))
-         Rhl(5) = (drho_dT(i)*Tl(5)+drho_dS(i)*Sl(5)) ; Rhl(6) = (drho_dT(i)*Tl(6)+drho_dS(i)*Sl(6))
-         Rhl(7) = (drho_dT(i)*Tl(7)+drho_dS(i)*Sl(7)) ; Rhl(8) = (drho_dT(i)*Tl(8)+drho_dS(i)*Sl(8))
-         Rhl(8) = (drho_dT(i)*Tl(9)+drho_dS(i)*Sl(9)) ; Rhl(10) = (drho_dT(i)*Tl(10)+drho_dS(i)*Sl(10))
+           mn_H = hl(1) + ( ( hl(2) + hl(3) ) + ( hl(4) + hl(5) ) ) &
+                + hl(6) + ( ( hl(7) + hl(8) ) + ( hl(9) + hl(10) ) )
+           if (mn_H>0.) mn_H = 1. / mn_H ! Hereafter, mn_H is the reciprocal of mean h for the stencil
+           ! Mean of S,T
+           mn_S = ( hl(1)*Sl(1) + ( ( hl(2)*Sl(2) + hl(3)*Sl(3) ) + ( hl(4)*Sl(4) + hl(5)*Sl(5) ) ) & 
+                  + hl(6)*Sl(6) + ( ( hl(7)*Sl(7) + hl(8)*Sl(8) ) + ( hl(9)*Sl(9) + hl(10)*Sl(10) ) ) ) * mn_H
+           mn_T = ( hl(1)*Tl(1) + ( ( hl(2)*Tl(2) + hl(3)*Tl(3) ) + ( hl(4)*Tl(4) + hl(5)*Tl(5) ) ) &
+                  + hl(6)*Tl(6) + ( ( hl(7)*Tl(7) + hl(8)*Tl(8) ) + ( hl(9)*Tl(9) + hl(10)*Tl(10) ) ) ) * mn_H
+           ! Adjust S,T vectors to have zero mean
+           Sl(:) = Sl(:) - mn_S ; mn_S = 0.
+           Tl(:) = Tl(:) - mn_T ; mn_T = 0.
+           Rhl(1) = (drho_dT(i)*Tl(1)+drho_dS(i)*Sl(1)) ; Rhl(2) = (drho_dT(i)*Tl(2)+drho_dS(i)*Sl(2))
+           Rhl(3) = (drho_dT(i)*Tl(3)+drho_dS(i)*Sl(3)) ; Rhl(4) = (drho_dT(i)*Tl(4)+drho_dS(i)*Sl(4))
+           Rhl(5) = (drho_dT(i)*Tl(5)+drho_dS(i)*Sl(5)) ; Rhl(6) = (drho_dT(i)*Tl(6)+drho_dS(i)*Sl(6))
+           Rhl(7) = (drho_dT(i)*Tl(7)+drho_dS(i)*Sl(7)) ; Rhl(8) = (drho_dT(i)*Tl(8)+drho_dS(i)*Sl(8))
+           Rhl(8) = (drho_dT(i)*Tl(9)+drho_dS(i)*Sl(9)) ; Rhl(10) = (drho_dT(i)*Tl(10)+drho_dS(i)*Sl(10))
 
-         ! Variance of T (or mean square error if mean is removed above)
-         mn_T2 = ( hl(1)*Tl(1)*Tl(1) + ( ( hl(2)*Tl(2)*Tl(2) + hl(3)*Tl(3)*Tl(3) )   &
-                                       + ( hl(4)*Tl(4)*Tl(4) + hl(5)*Tl(5)*Tl(5) ) ) &
-                 + hl(6)*Tl(6)*Tl(6) + ( ( hl(7)*Tl(7)*Tl(7) + hl(8)*Tl(8)*Tl(8) )   &
-                                       + ( hl(9)*Tl(9)*Tl(9) + hl(10)*Tl(10)*Tl(10) ) ) ) * mn_H
-         mn_T2 = max(0., mn_T2 - mn_T*mn_T) ! Variance should be positive but round-off can violate this.
-         ! Covariance of S,T
-         mn_ST = ( hl(1)*Sl(1)*Tl(1) + ( ( hl(2)*Sl(2)*Tl(2) + hl(3)*Sl(3)*Tl(3) )   &
-                                       + ( hl(4)*Sl(4)*Tl(4) + hl(5)*Sl(5)*Tl(5) ) ) & 
-                 + hl(6)*Sl(6)*Tl(6) + ( ( hl(7)*Sl(7)*Tl(7) + hl(8)*Sl(8)*Tl(8) )   &
-                                       + ( hl(9)*Sl(9)*Tl(9) + hl(10)*Sl(10)*Tl(10) ) ) ) * mn_H
+           ! Variance of T (or mean square error if mean is removed above)
+           mn_T2 = ( hl(1)*Tl(1)*Tl(1) + ( ( hl(2)*Tl(2)*Tl(2) + hl(3)*Tl(3)*Tl(3) )   &
+                                         + ( hl(4)*Tl(4)*Tl(4) + hl(5)*Tl(5)*Tl(5) ) ) &
+                   + hl(6)*Tl(6)*Tl(6) + ( ( hl(7)*Tl(7)*Tl(7) + hl(8)*Tl(8)*Tl(8) )   &
+                                         + ( hl(9)*Tl(9)*Tl(9) + hl(10)*Tl(10)*Tl(10) ) ) ) * mn_H
+           mn_T2 = max(0., mn_T2 - mn_T*mn_T) ! Variance should be positive but round-off can violate this.
+           ! Covariance of S,T
+           mn_ST = ( hl(1)*Sl(1)*Tl(1) + ( ( hl(2)*Sl(2)*Tl(2) + hl(3)*Sl(3)*Tl(3) )   &
+                                         + ( hl(4)*Sl(4)*Tl(4) + hl(5)*Sl(5)*Tl(5) ) ) & 
+                   + hl(6)*Sl(6)*Tl(6) + ( ( hl(7)*Sl(7)*Tl(7) + hl(8)*Sl(8)*Tl(8) )   &
+                                         + ( hl(9)*Sl(9)*Tl(9) + hl(10)*Sl(10)*Tl(10) ) ) ) * mn_H
 
-         cff1 = ( hl(1)*Rhl(1)*Rhl(1) + ( ( hl(2)*Rhl(2)*Rhl(2) + hl(3)*Rhl(3)*Rhl(3) )   &
-                                        + ( hl(4)*Rhl(4)*Rhl(4) + hl(5)*Rhl(5)*Rhl(5) ) ) & 
-                + hl(6)*Rhl(6)*Rhl(6) + ( ( hl(7)*Rhl(7)*Rhl(7) + hl(8)*Rhl(8)*Rhl(8) )   &
-                                        + ( hl(9)*Rhl(9)*Rhl(9) + hl(10)*Rhl(10)*Rhl(10) ) ) ) * mn_H
+           cff1 = ( hl(1)*Rhl(1)*Rhl(1) + ( ( hl(2)*Rhl(2)*Rhl(2) + hl(3)*Rhl(3)*Rhl(3) )   &
+                                          + ( hl(4)*Rhl(4)*Rhl(4) + hl(5)*Rhl(5)*Rhl(5) ) ) & 
+                  + hl(6)*Rhl(6)*Rhl(6) + ( ( hl(7)*Rhl(7)*Rhl(7) + hl(8)*Rhl(8)*Rhl(8) )   &
+                                          + ( hl(9)*Rhl(9)*Rhl(9) + hl(10)*Rhl(10)*Rhl(10) ) ) ) * mn_H
 
-         if(abs(cff1)> 0.) bcorr = ((drho_dT(i)*mn_T2)+(drho_dS(i)*mn_ST)) / cff1
+           if(abs(cff1)> 0.) bcorr = ((drho_dT(i)*mn_T2)+(drho_dS(i)*mn_ST)) / cff1
 
-         bcorr3d(i,j,k) = bcorr
-         deltarho_eos(i,j,k) = max(-2.0, &                     
-                  20.0*C1_8*drho_dT_dT(i)*(MEKE%deltarho_TW(i,j)**2)*(bcorr**2) * &     
-                  (0.5*(VarMix%ebt_struct(i,j,k)+VarMix%ebt_struct(i,j,km1))) )
-         !deltarho_eos(i,j,k) = max(-2.0, &                     
-         !         ! cff_drho*(MEKE%deltarho_TW(i,j)**2)*(bcorr**2) * &           
-         !         ! 100.0*(MEKE%Rd_dx_h(i,j)**2)*C1_8*drho_dT_dT(i)*(MEKE%deltarho_TW(i,j)**2)*(bcorr**2) * &           
-         !         10.0*C1_8*drho_dT_dT(i)*(MEKE%deltarho_TW(i,j)**2)*(bcorr**2) * &          !! This is GOOD !! 
-         !         ! (MEKE%Rd_dx_h(i,j)**2)*C1_8*drho_dT_dT(i)*(MEKE%deltarho_TW(i,j)**2)*(bcorr**2) * &       
-         !         ! 5.0*C1_8*drho_dT_dT(i)*(MEKE%deltarho_TW(i,j)**2)/(drho_dT(i)**2) * &           
-         !         ! 5.0*C1_8*drho_dT_dT(i)*(MEKE%deltarho_TW(i,j)**2)*(15**2) * &           
-         !         ! -0.25*MEKE%deltarho_TW(i,j) * &                                         
-         !         ! (0.5*(VarMix%ebt_struct(i,j,k)+VarMix%ebt_struct(i,j,km1)))**2 )
-         !         (0.5*(VarMix%ebt_struct(i,j,k)+VarMix%ebt_struct(i,j,km1))) )
+           bcorr3d(i,j,k) = bcorr
+           deltarho_eos(i,j,k) = max(-2.0, &                     
+                    20.0*C1_8*drho_dT_dT(i)*(MEKE%deltarho_TW(i,j)**2)*(bcorr**2) * &     
+                    (0.5*(VarMix%ebt_struct(i,j,k)+VarMix%ebt_struct(i,j,km1))) )
 
-      enddo                                                                      
-    enddo                                                                        
-  enddo                                                                          
+        enddo                                                                      
+      enddo                                                                        
+    enddo                                                                          
+  endif
 
   if (use_EOS) then
 ! With a bulk mixed layer, replace the T & S of any layers that are
@@ -778,9 +772,11 @@ subroutine PressureForce_AFV_Bouss(h, tv, PFu, PFv, G, GV, US, CS, ALE_CSp, p_at
                   dpa, intz_dpa, intx_dpa, inty_dpa, &
                   G%bathyT, dz_neglect, CS%useMassWghtInterp)
       endif
-      call int_density_dz_deltarho( e(:,:,K), e(:,:,K+1), deltarho_eos(:,:,k), &  
+      if (use_deltarho_eos) then
+        call int_density_dz_deltarho( e(:,:,K), e(:,:,K+1), deltarho_eos(:,:,k), &  
                      deltarho_eos(:,:,k+1), g_Earth_z, G%HI, G%HI, & 
                      dpa, intz_dpa, intx_dpa, inty_dpa)     
+      endif
       !$OMP parallel do default(shared)
       do j=Jsq,Jeq+1 ; do i=Isq,Ieq+1
         intz_dpa(i,j) = intz_dpa(i,j)*GV%Z_to_H

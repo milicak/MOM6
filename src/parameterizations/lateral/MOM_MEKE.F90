@@ -527,6 +527,19 @@ subroutine step_forward_MEKE(MEKE, h, SN_u, SN_v, visc, dt, G, GV, US, CS, hu, h
  !   enddo ; enddo
 
 !$OMP end parallel
+    ! compute deltarho_TW for patchy parameterization                               
+    if (associated(MEKE%deltarho_TW)) then 
+      do j=js,je ; do i=is,ie                                                      
+         fcor = 0.25*US%s_to_T*((G%CoriolisBu(I,J) + G%CoriolisBu(I-1,J-1)) + &
+                                (G%CoriolisBu(I-1,J) + G%CoriolisBu(I,J-1))) ! Coriolis parameter at h points
+         fcor = abs(fcor)
+         MEKE%deltarho_TW(i,j) = (sqrt(2.*max(0.,MEKE%MEKE(i,j))) &                   
+                               *LmixScale(i,j)*GV%Rho0*fcor)                   &   
+                             ! /(GV%g_Earth*500.0)                                   
+                             /(GV%g_Earth*max(10.0,min(500.0,G%bathyT(i,j))))
+      enddo ; enddo                                                                
+    endif
+
     call cpu_clock_begin(CS%id_clock_pass)
     call do_group_pass(CS%pass_MEKE, G%Domain)
     call cpu_clock_end(CS%id_clock_pass)
@@ -556,19 +569,6 @@ subroutine step_forward_MEKE(MEKE, h, SN_u, SN_v, visc, dt, G, GV, US, CS, hu, h
         endif
       endif
     endif
-    ! compute deltarho_TW for patchy parameterization                               
-!$OMP parallel do default(none) shared(is,ie,js,je,MEKE,LmixScale,CS,G,barotrFac2)
-    do j=js,je ; do i=is,ie                                                      
-       fcor = 0.25*US%s_to_T*((G%CoriolisBu(I,J) + G%CoriolisBu(I-1,J-1)) + &
-                              (G%CoriolisBu(I-1,J) + G%CoriolisBu(I,J-1))) ! Coriolis parameter at h points
-       ! fcor = 0.5*abs(fcor+abs(fcor))
-       fcor = abs(fcor)
-       MEKE%deltarho_TW(i,j) = (sqrt(2.*max(0.,MEKE%MEKE(i,j))) &                   
-                             *LmixScale(i,j)*GV%Rho0*fcor)                   &   
-                           ! /(GV%g_Earth*500.0)                                   
-                           /(GV%g_Earth*max(10.0,min(500.0,G%bathyT(i,j))))
-    enddo ; enddo                                                                
-
     ! Calculate viscosity for the main model to use
     if (CS%viscosity_coeff_Ku /=0.) then
       do j=js,je ; do i=is,ie
@@ -1221,6 +1221,7 @@ logical function MEKE_init(Time, G, US, param_file, diag, CS, MEKE, restart_CS)
   if (associated(MEKE%MEKE)) then
     call create_group_pass(CS%pass_MEKE, MEKE%MEKE, G%Domain)
     if (associated(MEKE%Kh_diff)) call create_group_pass(CS%pass_MEKE, MEKE%Kh_diff, G%Domain)
+    if (associated(MEKE%deltarho_TW)) call create_group_pass(CS%pass_MEKE, MEKE%deltarho_TW, G%Domain)
     if (.not.CS%initialize) call do_group_pass(CS%pass_MEKE, G%Domain)
   endif
   if (associated(MEKE%Kh)) call create_group_pass(CS%pass_Kh, MEKE%Kh, G%Domain)
@@ -1243,6 +1244,7 @@ subroutine MEKE_alloc_register_restart(HI, param_file, MEKE, restart_CS)
   type(vardesc) :: vd
   real :: MEKE_GMcoeff, MEKE_FrCoeff, MEKE_GMECoeff, MEKE_KHCoeff, MEKE_viscCoeff_Ku, MEKE_viscCoeff_Au
   logical :: Use_KH_in_MEKE
+  logical :: Use_deltarho_TW
   logical :: useMEKE
   integer :: isd, ied, jsd, jed
 
@@ -1257,6 +1259,7 @@ subroutine MEKE_alloc_register_restart(HI, param_file, MEKE, restart_CS)
   MEKE_viscCoeff_Ku =0.; call read_param(param_file,"MEKE_VISCOSITY_COEFF_KU",MEKE_viscCoeff_Ku)
   MEKE_viscCoeff_Au =0.; call read_param(param_file,"MEKE_VISCOSITY_COEFF_AU",MEKE_viscCoeff_Au)
   Use_KH_in_MEKE = .false.; call read_param(param_file,"USE_KH_IN_MEKE", Use_KH_in_MEKE)
+  Use_deltarho_TW = .false.; call read_param(param_file,"USE_DELTARHO_TW", Use_deltarho_TW)
 ! Allocate control structure
   if (associated(MEKE)) then
     call MOM_error(WARNING, "MEKE_alloc_register_restart called with an associated "// &
@@ -1273,10 +1276,12 @@ subroutine MEKE_alloc_register_restart(HI, param_file, MEKE, restart_CS)
   vd = var_desc("MEKE", "m2 s-2", hor_grid='h', z_grid='1', &
            longname="Mesoscale Eddy Kinetic Energy")
   call register_restart_field(MEKE%MEKE, vd, .false., restart_CS)
-  allocate(MEKE%deltarho_TW(isd:ied,jsd:jed)) ; MEKE%deltarho_TW(:,:) = 0.0
-  vd = var_desc("MEKE_deltarho_TW", "kg m-3",hor_grid='h',z_grid='1', & 
+  if (Use_deltarho_TW) then
+    allocate(MEKE%deltarho_TW(isd:ied,jsd:jed)) ; MEKE%deltarho_TW(:,:) = 0.0
+    vd = var_desc("MEKE_deltarho_TW", "kg m-3",hor_grid='h',z_grid='1', & 
           longname="Thermal Wind deltarho from Mesoscale Eddy Kinetic Energy")
-  call register_restart_field(MEKE%deltarho_TW, vd, .false., restart_CS)
+    call register_restart_field(MEKE%deltarho_TW, vd, .false., restart_CS)
+  endif
   if (MEKE_GMcoeff>=0.) then
     allocate(MEKE%GM_src(isd:ied,jsd:jed)) ; MEKE%GM_src(:,:) = 0.0
   endif
