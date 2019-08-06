@@ -61,7 +61,7 @@ type, public :: PressureForce_AFV_CS ; private
 
   integer :: id_e_tidal = -1 !< Diagnostic identifier
   integer :: id_deltarho3d = -1 ! Diagnostic for deltarho_eos
-  integer :: id_bcorr = -1 ! Diagnostic for deltarho_eos
+  integer :: id_bcorr = -1 ! Diagnostic for correlation between rho and T 
   type(tidal_forcing_CS), pointer :: tides_CSp => NULL() !< Tides control structure
 end type PressureForce_AFV_CS
 
@@ -441,7 +441,7 @@ subroutine PressureForce_AFV_Bouss(h, tv, PFu, PFv, G, GV, US, CS, ALE_CSp, p_at
   type(VarMix_CS),                          optional, pointer     :: VarMix !< Variable mixing coefficients
   ! Local variables
   real, dimension(SZI_(G),SZJ_(G),SZK_(G)+1) :: deltarho_eos ! patchy deltarho due to EOS [kg m-3].
-  real, dimension(SZI_(G),SZJ_(G),SZK_(G)+1) :: bcorr3d ! patchy deltarho due to EOS [kg m-3].
+  real, dimension(SZI_(G),SZJ_(G),SZK_(G)+1) :: bcorr3d ! patchy deltarho correlation between rho and T 
   real, dimension(SZI_(G)) :: press ! pressure at each interface (Pa)            
   real :: cff1       ! coefficient forpatchy deltarho parameterization      
   real :: Ttmp(SZI_(G))        ! Interface temperature in C.                     
@@ -934,7 +934,7 @@ subroutine PressureForce_AFV_init(Time, G, GV, US, param_file, diag, CS, tides_C
   CS%id_deltarho3d = register_diag_field('ocean_model', 'MEKE_deltarho_eos', diag%axesTi, &
           Time, 'MEKE derived patchy deltarho due to EOS in 3d', 'kg m-3')
   CS%id_bcorr = register_diag_field('ocean_model', 'MEKE_bcorr', diag%axesTi, &
-          Time, 'MEKE derived patchy corr due to EOS in 3d', 'kg m-3')
+          Time, 'MEKE derived patchy correlation in 3d', 'unit')
 
   CS%GFS_scale = 1.0
   if (GV%g_prime(1) /= GV%g_Earth) CS%GFS_scale = GV%g_prime(1) / GV%g_Earth
